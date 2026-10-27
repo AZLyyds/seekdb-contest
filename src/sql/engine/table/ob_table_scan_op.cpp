@@ -943,6 +943,42 @@ int ObTableScanOp::prepare_all_das_tasks()
   return ret;
 }
 
+// Filters can reject retrieved documents, and sorts or index merges can change
+// which documents reach a limit. Keep the limit above those attached nodes.
+static bool attach_tree_blocks_ir_limit(const ObDASBaseCtDef *ctdef)
+{
+  bool has_filter = false;
+  if (nullptr != ctdef) {
+    if (ObDASOpType::DAS_OP_SORT == ctdef->op_type_
+        || ObDASOpType::DAS_OP_INDEX_MERGE == ctdef->op_type_) {
+      // Do not truncate an input before a node changes its order or combines
+      // it with another input. The limit belongs above that operation.
+      has_filter = true;
+    } else if (ObDASOpType::DAS_OP_TABLE_SCAN == ctdef->op_type_) {
+      has_filter = !static_cast<const ObDASScanCtDef *>(ctdef)->pd_expr_spec_.pushdown_filters_.empty();
+    }
+    for (int64_t i = 0; !has_filter && nullptr != ctdef->children_ && i < ctdef->children_cnt_; ++i) {
+      has_filter = attach_tree_blocks_ir_limit(ctdef->children_[i]);
+    }
+  }
+  return has_filter;
+}
+
+// Collect the text retrieval nodes of an attached iterator tree: a scan that
+// also reads the main table keeps the retrieval below a lookup node.
+static void find_ir_scan_rtdef(ObDASBaseRtDef *rtdef, ObDASIRScanRtDef *&found, int64_t &cnt)
+{
+  if (nullptr != rtdef) {
+    if (ObDASOpType::DAS_OP_IR_SCAN == rtdef->op_type_) {
+      ++cnt;
+      found = static_cast<ObDASIRScanRtDef *>(rtdef);
+    }
+    for (int64_t i = 0; OB_NOT_NULL(rtdef->children_) && i < rtdef->children_cnt_; ++i) {
+      find_ir_scan_rtdef(rtdef->children_[i], found, cnt);
+    }
+  }
+}
+
 int ObTableScanOp::init_attach_scan_rtdef(const ObDASBaseCtDef *attach_ctdef,
                                           ObDASBaseRtDef *&attach_rtdef)
 {
@@ -1064,6 +1100,27 @@ int ObTableScanOp::init_table_scan_rtdef()
       //has no pushdown task, means all attach task can be pushdown
       if (OB_FAIL(tsc_rtdef_.attach_rtinfo_->pushdown_tasks_.push_back(
           tsc_rtdef_.attach_rtinfo_->attach_rtdef_))) {
+      }
+    }
+    if (OB_SUCC(ret) && limit_param_.is_valid() && 0 == limit_param_.offset_
+        && MY_SPEC.filters_.empty()
+        && !attach_tree_blocks_ir_limit(MY_CTDEF.attach_spec_.attach_ctdef_)
+        && !MY_SPEC.use_dist_das_ && !MY_SPEC.gi_above_ && nullptr == MY_CTDEF.das_dppr_tbl_
+        && nullptr != tsc_rtdef_.scan_rtdef_.table_loc_
+        && 1 == tsc_rtdef_.scan_rtdef_.table_loc_->get_tablet_locs().size()) {
+      // This scan yields exactly the documents that match, so the limit the
+      // planner put on it counts the same documents the operator above will
+      // read. A retrieval that knows the limit can stop on its own, while one
+      // that does not has to read the whole scan range before its first row.
+      // Only when the scan drops nothing on its way out, though: a filter that
+      // rejects a row removes it before the limit is applied, so a retrieval
+      // that stopped after limit rows could stop one row too early. That is
+      // also why a filtered attach tree below is refused above.
+      ObDASIRScanRtDef *ir_rtdef = nullptr;
+      int64_t ir_cnt = 0;
+      find_ir_scan_rtdef(tsc_rtdef_.attach_rtinfo_->attach_rtdef_, ir_rtdef, ir_cnt);
+      if (1 == ir_cnt && nullptr != ir_rtdef) {
+        ir_rtdef->pushdown_limit_param_ = limit_param_;
       }
     }
   }

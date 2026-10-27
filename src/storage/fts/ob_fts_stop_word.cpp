@@ -198,20 +198,18 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
-  int64_t word_count = 0;
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (!flag_.groupby_word()) {
-    if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
-    }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
+    ret = word_map_.set_refactored(word, 1/*word count*/);
   } else {
-    if (OB_HASH_NOT_EXIST == ret) {
-      word_count = 1;
+    // The map belongs to this document's synchronous parse. Repeated words can
+    // update the existing value without a second hash lookup.
+    int64_t *word_count = word_map_.get(word);
+    if (word_count != nullptr) {
+      *word_count += word_freq;
     } else {
-      word_count += word_freq;
-    }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+      ret = word_map_.set_refactored(word, 1/*first occurrence*/);
     }
   }
   return ret;

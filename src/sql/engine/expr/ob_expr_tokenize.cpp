@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <atomic>
+
 #include "sql/engine/expr/ob_expr_tokenize.h"
 
 #include "lib/alloc/alloc_struct.h"
@@ -212,7 +214,8 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
   } else if (OB_FAIL(parse_fulltext(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_name(expr, ctx, param))) {
   } else if (OB_FAIL(parse_parser_properties(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(param.reform_parser_properties(param.properties_))) {
+  } else if (!param.properties_.empty()
+             && OB_FAIL(param.reform_parser_properties(param.properties_))) {
   } else if (OB_FAIL(param.try_load_dictionary_for_ik())) {
   }
   return ret;
@@ -392,9 +395,19 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
 int ObExprTokenize::TokenizeParam::try_load_dictionary_for_ik()
 {
   int ret = OB_SUCCESS;
+  // The general dictionary loader loads the built in dictionaries once for the
+  // whole process and never clears that state, and every call has to take its
+  // global write lock to find that out. Remember the answer instead: this runs
+  // on every tokenize() call, and after the first one there is nothing to do.
+  static std::atomic<bool> dictionary_loaded(false);
   bool need_to_load_dic = false;
   storage::ObDicLoaderHandle dic_loader_handle;
-  if (OB_FAIL(share::ObFtsIndexBuilderUtil::check_need_to_load_dic(
+  // The loader also validates the input charset. Only its supported charset
+  // may use the readiness cache; unsupported inputs must keep the loader error.
+  const bool has_supported_charset =
+      CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(meta_.get_collation_type());
+  if (has_supported_charset && dictionary_loaded.load(std::memory_order_relaxed)) {
+  } else if (OB_FAIL(share::ObFtsIndexBuilderUtil::check_need_to_load_dic(
           parser_name_, need_to_load_dic))) {
   } else if (need_to_load_dic) {
     if (OB_FAIL(storage::ObGenDicLoader::get_instance().get_dic_loader(
@@ -404,6 +417,9 @@ int ObExprTokenize::TokenizeParam::try_load_dictionary_for_ik()
     } else if (OB_UNLIKELY(!dic_loader_handle.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(dic_loader_handle.get_loader()->try_load_dictionary_in_trans())) {
+    } else {
+      // only remember the success, a transient failure has to be retried
+      dictionary_loaded.store(true, std::memory_order_relaxed);
     }
   }
   return ret;

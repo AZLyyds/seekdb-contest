@@ -480,6 +480,26 @@ public:
     int64_t cmp_count_;
     int64_t cmp_start_;
     int64_t cmp_end_;
+    // Cached first (and only) sort key, used by the single key fast path in
+    // operator(). Only meaningful when single_key_valid_ is set.
+    bool single_key_valid_;
+    bool single_key_ascending_;
+    int64_t single_key_idx_;
+    common::ObDatumCmpFuncType single_key_cmp_;
+    // The sort key descriptors, copied out of the two arrays passed to init().
+    // A comparison looks at every key, and reading them back from the arrays
+    // costs an ObIArrayWrap::at() each; a sort that does not spill still runs
+    // the comparison O(n log n) times. Only the sorts whose key list is short
+    // enough are cached, the others keep reading the arrays.
+    static const int64_t MAX_CACHED_SORT_KEYS = 8;
+    struct CachedSortKey
+    {
+      int64_t field_idx_;
+      common::ObDatumCmpFuncType cmp_func_;
+      bool is_ascending_;
+    };
+    bool cached_keys_valid_;
+    CachedSortKey cached_keys_[MAX_CACHED_SORT_KEYS];
   private:
     int64_t cnt_;
     DISALLOW_COPY_AND_ASSIGN(Compare);
