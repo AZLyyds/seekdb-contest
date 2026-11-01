@@ -289,10 +289,10 @@ END_P SET_VAR DELIMITER
         FOUND FORK FREEZE FREQUENCY FUNCTION FOLLOWING FLASHBACK FULL FRAGMENTATION FROZEN FILE_ID FILTER
         FIELD_OPTIONALLY_ENCLOSED_BY FIELD_DELIMITER FIELD_ENCLOSED_BY FILE_EXTENSION
 
-        GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GRANTS GROUP_CONCAT GROUPING
+        GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GLOB GRANTS GROUP_CONCAT GROUPING
         GLOBAL_ALIAS
 
-        HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
+        HASH HEAP HELP HEADER HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
 
         IDENTIFIED IK_MODE ILOG IMMEDIATE IMPORT INCLUDING INCR INDEXES INFO
         INNODB INPLACE INSERT_METHOD INSTANT INSTANCE INVOKER IO IO_THREAD IPC ISOLATE ISOLATION ISSUER
@@ -318,7 +318,7 @@ END_P SET_VAR DELIMITER
 
         NAME NAMES NAMESPACE NATIONAL NCHAR NDB NDBCLUSTER NESTED NEW NEXT NO NOAUDIT NONE NORMAL NOW NOWAIT NEVER NGRAM_TOKEN_SIZE
         NO_WAIT NULLS NUMBER NVARCHAR NTILE NTH_VALUE NETWORK NOPARALLEL
-        NULL_IF_EXETERNAL
+        NULL_IF_EXETERNAL NULLSTR
 
         OBSOLETE OBJECT OCCUR OF OFF OFFSET OLD OLD_PASSWORD ONE ONE_SHOT ONLY OPEN OPTIONS ORDINALITY OURS OLD_KEY OVER
         OJ
@@ -336,9 +336,9 @@ END_P SET_VAR DELIMITER
         REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
-        RANK READ_ONLY RECOVERY REJECT ROLE
+        RANK READ_ONLY READ_CSV READ_JSON READ_PARQUET RECOVERY REJECT ROLE
 
-        SAMPLE SAVEPOINT SCALARS SCHEMA_NAME SCN SCOPE SCORE SECOND SECURITY SEED
+        SAMPLE SAMPLE_SIZE SAVEPOINT SCALARS SCHEMA_NAME SCN SCOPE SCORE SECOND SECURITY SEED
         SEMISTRUCT_ENCODING_TYPE SERIAL SERIALIZABLE SESSION SESSION_USER SET_TP SHARE SHARED SHUTDOWN SIGNED
         SIMPLE SINGLE SKIP_INDEX SLAVE SLOW SLOT_IDX SNAPSHOT SOME SOUNDS SOURCE
         SPFILE SPLIT SQL_AFTER_GTIDS SQL_AFTER_MTS_GAPS SQL_BEFORE_GTIDS SQL_BUFFER_RESULT SQL_CACHE SQL_NO_CACHE SQL_ID SCHEMA_ID
@@ -511,6 +511,8 @@ END_P SET_VAR DELIMITER
 %type <node> column_list_with_boost with_param_column_ref
 %type <node> es_sql_opt
 %type <node> hybrid_search_expr hybrid_search_param
+%type <node> file_sql_table_expr file_sql_arg_list file_sql_arg file_sql_named_arg
+%type <node> copy_to_stmt copy_to_option_list copy_to_option
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
 %type <node> flush_privileges_stmt opt_flush_privileges_scope
@@ -647,6 +649,7 @@ stmt:
   | purge_stmt              { $$ = $1; check_question_mark($$, result); }
   | analyze_stmt            { $$ = $1; check_question_mark($$, result); }
   | load_data_stmt          { $$ = $1; check_question_mark($$, result); }
+  | copy_to_stmt            { $$ = $1; question_mark_issue($$, result); }
   | optimize_stmt     { $$ = $1; check_question_mark($$, result); }
   | flush_privileges_stmt { $$ = $1; check_question_mark($$, result); }
   | dump_memory_stmt  { $$ = $1; check_question_mark($$, result); }
@@ -10848,6 +10851,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_sql_table_expr
+{
+  $$ = $1;
+}
 ;
 
 tbl_name:
@@ -17479,6 +17486,201 @@ literal
 }
 ;
 
+/* File SQL: DuckDB-style table functions + COPY TO */
+file_sql_table_expr:
+READ_CSV '(' file_sql_arg_list ')'
+{
+  ParseNode *alias_node = NULL;
+  ParseNode *args = NULL;
+  make_name_node(alias_node, result->malloc_pool_, "read_csv");
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, alias_node, NULL);
+  $$->value_ = 1; /* READ_CSV */
+}
+| READ_CSV '(' file_sql_arg_list ')' relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $5, NULL);
+  $$->value_ = 1;
+}
+| READ_CSV '(' file_sql_arg_list ')' AS relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $6, NULL);
+  $$->value_ = 1;
+}
+| READ_JSON '(' file_sql_arg_list ')'
+{
+  ParseNode *alias_node = NULL;
+  ParseNode *args = NULL;
+  make_name_node(alias_node, result->malloc_pool_, "read_json");
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, alias_node, NULL);
+  $$->value_ = 2; /* READ_JSON */
+}
+| READ_JSON '(' file_sql_arg_list ')' relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $5, NULL);
+  $$->value_ = 2;
+}
+| READ_JSON '(' file_sql_arg_list ')' AS relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $6, NULL);
+  $$->value_ = 2;
+}
+| READ_PARQUET '(' file_sql_arg_list ')'
+{
+  ParseNode *alias_node = NULL;
+  ParseNode *args = NULL;
+  make_name_node(alias_node, result->malloc_pool_, "read_parquet");
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, alias_node, NULL);
+  $$->value_ = 3; /* READ_PARQUET */
+}
+| READ_PARQUET '(' file_sql_arg_list ')' relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $5, NULL);
+  $$->value_ = 3;
+}
+| READ_PARQUET '(' file_sql_arg_list ')' AS relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $6, NULL);
+  $$->value_ = 3;
+}
+| GLOB '(' file_sql_arg_list ')'
+{
+  ParseNode *alias_node = NULL;
+  ParseNode *args = NULL;
+  make_name_node(alias_node, result->malloc_pool_, "glob");
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, alias_node, NULL);
+  $$->value_ = 4; /* GLOB */
+}
+| GLOB '(' file_sql_arg_list ')' relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $5, NULL);
+  $$->value_ = 4;
+}
+| GLOB '(' file_sql_arg_list ')' AS relation_name
+{
+  ParseNode *args = NULL;
+  merge_nodes(args, result, T_FILE_SQL_ARG_LIST, $3);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_TABLE, 3, args, $6, NULL);
+  $$->value_ = 4;
+}
+;
+
+file_sql_arg_list:
+file_sql_arg
+{
+  $$ = $1;
+}
+| file_sql_arg_list ',' file_sql_arg
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_sql_arg:
+expr
+{
+  $$ = $1;
+}
+| file_sql_named_arg
+{
+  $$ = $1;
+}
+;
+
+file_sql_named_arg:
+HEADER COMP_EQ expr
+{
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "header");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_NAMED_ARG, 2, name_node, $3);
+}
+| SAMPLE_SIZE COMP_EQ expr
+{
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "sample_size");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_NAMED_ARG, 2, name_node, $3);
+}
+| FORMAT COMP_EQ expr
+{
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_NAMED_ARG, 2, name_node, $3);
+}
+| NULLSTR COMP_EQ expr
+{
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "nullstr");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_NAMED_ARG, 2, name_node, $3);
+}
+;
+
+copy_to_stmt:
+COPY select_with_parens TO STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_TO_STMT, 3, $2, $4, NULL);
+}
+| COPY select_with_parens TO STRING_VALUE '(' copy_to_option_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_TO_STMT, 3, $2, $4, $6);
+}
+;
+
+copy_to_option_list:
+copy_to_option
+{
+  $$ = $1;
+}
+| copy_to_option_list ',' copy_to_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_to_option:
+FORMAT expr
+{
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "format");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_NAMED_ARG, 2, name_node, $2);
+}
+| HEADER
+{
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "header");
+  ParseNode *true_node = NULL;
+  malloc_terminal_node(true_node, result->malloc_pool_, T_BOOL);
+  true_node->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_NAMED_ARG, 2, name_node, true_node);
+}
+| NULLSTR expr
+{
+  ParseNode *name_node = NULL;
+  make_name_node(name_node, result->malloc_pool_, "nullstr");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_SQL_NAMED_ARG, 2, name_node, $2);
+}
+| file_sql_named_arg
+{
+  $$ = $1;
+}
+;
+
 unreserved_keyword:
 unreserved_keyword_for_role_name { $$=$1;}
 | unreserved_keyword_ambiguous_roles { $$=$1;}
@@ -17557,6 +17759,8 @@ ACCOUNT
 |       CACHE
 |       CALIBRATION
 |       CALIBRATION_INFO
+|       GLOB
+|       HEADER
 |       KVCACHE
 |       ILOGCACHE
 |       CALC_PARTITION_ID
@@ -17863,6 +18067,7 @@ ACCOUNT
 |       NO_WAIT
 |       NTILE
 |       NTH_VALUE
+|       NULLSTR
 |       NUMBER
 |       NULL_IF_EXETERNAL
 |       NULLS
@@ -17936,7 +18141,10 @@ ACCOUNT
 |       QUEUE_TIME
 |       QUICK
 |       RANK
+|       READ_CSV
+|       READ_JSON
 |       READ_ONLY
+|       READ_PARQUET
 |       RECOVER
 |       RECOVERY
 |       RECURSIVE
@@ -17976,6 +18184,7 @@ ACCOUNT
 |       RTREE
 |       RUN
 |       SAMPLE
+|       SAMPLE_SIZE
 |       SAVEPOINT
 |       SCALARS
 |       SCHEMA_NAME

@@ -2275,6 +2275,11 @@ typedef enum ObItemType
   T_DIFF_TABLE = 4918,
   T_MERGE_TABLE = 4919,
   T_FLUSH_PRIVILEGES = 4920,
+  // File SQL table functions and COPY TO (2026-competition)
+  T_FILE_SQL_TABLE = 4921,
+  T_FILE_SQL_NAMED_ARG = 4922,
+  T_FILE_SQL_ARG_LIST = 4923,
+  T_COPY_TO_STMT = 4924,
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 
