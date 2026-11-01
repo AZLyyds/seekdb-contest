@@ -2724,6 +2724,13 @@ int ObDMLResolver::resolve_table(const ParseNode &parse_tree,
         }
         break;
       }
+      case T_FILE_SQL_TABLE: {
+        if (OB_ISNULL(session_info_)) {
+          ret = OB_INVALID_ARGUMENT;
+        } else if (OB_FAIL(resolve_file_sql_table_item(*table_node, table_item))) {
+        }
+        break;
+      }
       default:
         /* won't be here */
         ret = OB_ERR_PARSER_SYNTAX;
@@ -12818,6 +12825,144 @@ int ObDMLResolver::check_need_fill_embedded_vec_expr_param(const ObDMLStmt &stmt
       } else if (session_info_->get_ddl_info().is_ddl()) {
         need_fill = false;
       }
+    }
+  }
+  return ret;
+}
+
+int ObDMLResolver::resolve_file_sql_table_item(const ParseNode &table_node, TableItem *&table_item)
+{
+  int ret = OB_SUCCESS;
+  ObDMLStmt *dml_stmt = get_stmt();
+  table_item = NULL;
+  bool enable_file_sql = false;
+  if (OB_ISNULL(dml_stmt) || OB_ISNULL(allocator_) || OB_ISNULL(session_info_) ||
+      OB_ISNULL(params_.expr_factory_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_UNLIKELY(T_FILE_SQL_TABLE != table_node.type_ || 3 != table_node.num_child_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected file sql table node", K(table_node.type_), K(table_node.num_child_));
+  } else if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enable_file_sql))) {
+    LOG_WARN("failed to read enable_file_sql", K(ret));
+  } else if (!enable_file_sql) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql (enable_file_sql is OFF)");
+  } else {
+    const int64_t kind = table_node.value_; // 1 csv, 2 json, 3 parquet, 4 glob
+    const ParseNode *args_node = table_node.children_[0];
+    const ParseNode *alias_node = table_node.children_[1];
+    ObString path;
+    ObString format;
+    bool has_sample_size = false;
+    int64_t sample_size = -1;
+    bool header = true;
+    ObSEArray<const ParseNode *, 8> flat_args;
+
+    // Flatten T_FILE_SQL_ARG_LIST / T_LINK_NODE into a linear arg list.
+    ObSEArray<const ParseNode *, 8> stack;
+    if (OB_NOT_NULL(args_node)) {
+      if (OB_FAIL(stack.push_back(args_node))) {
+      }
+    }
+    while (OB_SUCC(ret) && !stack.empty()) {
+      const ParseNode *cur = NULL;
+      if (OB_FAIL(stack.pop_back(cur))) {
+      } else if (OB_ISNULL(cur)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (T_LINK_NODE == cur->type_ || T_FILE_SQL_ARG_LIST == cur->type_) {
+        for (int64_t i = cur->num_child_ - 1; OB_SUCC(ret) && i >= 0; --i) {
+          if (OB_FAIL(stack.push_back(cur->children_[i]))) {
+          }
+        }
+      } else if (OB_FAIL(flat_args.push_back(cur))) {
+      }
+    }
+
+    for (int64_t i = 0; OB_SUCC(ret) && i < flat_args.count(); ++i) {
+      const ParseNode *arg = flat_args.at(i);
+      if (OB_ISNULL(arg)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (T_FILE_SQL_NAMED_ARG == arg->type_) {
+        if (OB_UNLIKELY(2 != arg->num_child_) || OB_ISNULL(arg->children_[0]) || OB_ISNULL(arg->children_[1])) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          ObString name(static_cast<int32_t>(arg->children_[0]->str_len_), arg->children_[0]->str_value_);
+          const ParseNode *val = arg->children_[1];
+          if (0 == name.case_compare("sample_size")) {
+            has_sample_size = true;
+            if (T_INT == val->type_ || T_NUMBER == val->type_) {
+              sample_size = val->value_;
+            } else {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql sample_size value");
+            }
+          } else if (0 == name.case_compare("header")) {
+            if (T_BOOL == val->type_) {
+              header = (0 != val->value_);
+            } else if (T_INT == val->type_) {
+              header = (0 != val->value_);
+            }
+          } else if (0 == name.case_compare("format")) {
+            if (T_VARCHAR == val->type_ || T_CHAR == val->type_) {
+              format.assign_ptr(val->str_value_, static_cast<int32_t>(val->str_len_));
+            } else {
+              ret = OB_ERR_PARSER_SYNTAX;
+              LOG_WARN("invalid file sql format literal", K(val->type_));
+            }
+          } else if (0 == name.case_compare("nullstr")) {
+            // accepted; applied by COPY TO / readers later
+          } else {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql named argument");
+          }
+        }
+      } else if (path.empty() && (T_VARCHAR == arg->type_ || T_CHAR == arg->type_)) {
+        path.assign_ptr(arg->str_value_, static_cast<int32_t>(arg->str_len_));
+      } else if (format.empty() && (T_VARCHAR == arg->type_ || T_CHAR == arg->type_)) {
+        // positional second string: treated as format (DuckDB-style)
+        format.assign_ptr(arg->str_value_, static_cast<int32_t>(arg->str_len_));
+      } else {
+        ret = OB_ERR_PARSER_SYNTAX;
+        LOG_WARN("unexpected file sql positional argument", K(arg->type_));
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+    } else if (path.empty()) {
+      ret = OB_ERR_PARSER_SYNTAX;
+      LOG_WARN("file sql path missing");
+    } else if (has_sample_size && sample_size != -1) {
+      // Contest contract: only sample_size=-1 (full scan) is accepted.
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql sample_size other than -1");
+    } else if (!format.empty()) {
+      if (2 == kind) { // read_json
+        if (0 != format.case_compare("newline_delimited") &&
+            0 != format.case_compare("jsonl") &&
+            0 != format.case_compare("ndjson")) {
+          ret = OB_ERR_PARSER_SYNTAX;
+          LOG_WARN("unsupported read_json format", K(format));
+        }
+      } else if (1 == kind) { // read_csv — only auto/csv
+        if (0 != format.case_compare("csv") && 0 != format.case_compare("auto")) {
+          ret = OB_ERR_PARSER_SYNTAX;
+          LOG_WARN("unsupported read_csv format", K(format));
+        }
+      } else if (3 == kind) {
+        if (0 != format.case_compare("parquet") && 0 != format.case_compare("auto")) {
+          ret = OB_ERR_PARSER_SYNTAX;
+        }
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      // Readers / physical scan land in a follow-up change. Keep the gate and
+      // option validation behavior fixed so OFF / bad-format / sample_size fail correctly.
+      UNUSED(header);
+      UNUSED(alias_node);
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql table scan (csv/json/parquet/glob)");
+      LOG_WARN("file sql scan not implemented yet", K(kind), K(path), K(format));
     }
   }
   return ret;
