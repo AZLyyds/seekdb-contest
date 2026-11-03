@@ -212,6 +212,9 @@ public:
   int unnest_table_add_column(TableItem *&table_item, ColumnItem *&col_item, ObString col_name);
   int resolve_hybrid_search_item(const ParseNode &parse_tree, TableItem *&table_item);
   int resolve_file_sql_table_item(const ParseNode &table_node, TableItem *&table_item);
+  int gen_file_sql_column_items(const common::ObIArray<common::ObString> &col_names,
+                                const common::ObIArray<ObRawExprResType> &res_types,
+                                TableItem &table_item);
 
   int fill_same_column_to_using(JoinedTable* &joined_table);
   int get_columns_from_table_item(const TableItem *table_item, common::ObIArray<common::ObString> &column_names);

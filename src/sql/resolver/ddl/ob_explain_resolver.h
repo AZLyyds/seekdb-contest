@@ -45,6 +45,29 @@ namespace sql
       UNUSED(order_item);
       return common::OB_SUCCESS;
     }
+  private:
+    int resolve_file_sql_describe_(const ParseNode &parse_tree);
+  };
+
+  // COPY (select ...) TO 'path' (options...) — write CSV at resolve time for File SQL.
+  class ObCopyToResolver : public ObDMLResolver
+  {
+  public:
+    explicit ObCopyToResolver(ObResolverParams &params) : ObDMLResolver(params) {}
+    virtual ~ObCopyToResolver() {}
+    virtual int resolve(const ParseNode &parse_tree);
+    int resolve_columns(ObRawExpr *&expr, common::ObArray<ObQualifiedName> &columns)
+    {
+      UNUSED(expr);
+      UNUSED(columns);
+      return common::OB_SUCCESS;
+    }
+    virtual int resolve_order_item(const ParseNode &sort_node, OrderItem &order_item)
+    {
+      UNUSED(sort_node);
+      UNUSED(order_item);
+      return common::OB_SUCCESS;
+    }
   };
 
 }

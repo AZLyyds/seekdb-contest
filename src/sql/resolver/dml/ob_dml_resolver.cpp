@@ -41,6 +41,7 @@
 #include "sql/resolver/dcl/ob_dcl_resolver.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
+#include "sql/resolver/dml/ob_file_sql_reader.h"
 
 namespace oceanbase
 {
@@ -12955,14 +12956,212 @@ int ObDMLResolver::resolve_file_sql_table_item(const ParseNode &table_node, Tabl
       }
     }
 
+    ObFileSqlTable file_table;
+    if (OB_FAIL(ret)) {
+    } else if (1 == kind) {
+      if (OB_FAIL(ob_file_sql_read_csv(*allocator_, path, header, file_table))) {
+        LOG_WARN("read_csv failed", K(ret), K(path));
+      }
+    } else if (2 == kind) {
+      if (OB_FAIL(ob_file_sql_read_jsonl(*allocator_, path, file_table))) {
+        LOG_WARN("read_json failed", K(ret), K(path));
+      }
+    } else if (3 == kind) {
+      if (OB_FAIL(ob_file_sql_read_parquet_plain(*allocator_, path, file_table))) {
+        LOG_WARN("read_parquet failed", K(ret), K(path));
+      }
+    } else if (4 == kind) {
+      if (OB_FAIL(ob_file_sql_glob(*allocator_, path, file_table))) {
+        LOG_WARN("glob failed", K(ret), K(path));
+      }
+    } else {
+      ret = OB_ERR_UNEXPECTED;
+    }
+
+    // Materialize as VALUES_TABLE so existing values-table executor path is reused.
+    TableItem *new_table_item = NULL;
+    ObValuesTableDef *table_def = NULL;
+    ObString alias_name;
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(new_table_item = dml_stmt->create_table_item(*allocator_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (NULL != alias_node) {
+      alias_name.assign_ptr(alias_node->str_value_, static_cast<int32_t>(alias_node->str_len_));
+    } else if (OB_FAIL(dml_stmt->generate_values_table_name(*allocator_, alias_name))) {
+    } else {
+    }
+
+    void *buf = NULL;
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(buf = allocator_->alloc(sizeof(ObValuesTableDef)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      table_def = new (buf) ObValuesTableDef();
+      new_table_item->values_table_def_ = table_def;
+      table_def->access_type_ = ObValuesTableDef::ACCESS_EXPR;
+      table_def->is_const_ = true;
+      table_def->column_cnt_ = file_table.col_cnt();
+      table_def->row_cnt_ = file_table.row_cnt_;
+    }
+
+    common::ObCollationType cs_type = CS_TYPE_UTF8MB4_GENERAL_CI;
+    if (OB_SUCC(ret) && OB_NOT_NULL(session_info_)) {
+      (void)session_info_->get_collation_connection(cs_type);
+    }
+
+    // Build typed constant exprs (row-major).
+    for (int64_t r = 0; OB_SUCC(ret) && r < file_table.row_cnt_; ++r) {
+      for (int64_t c = 0; OB_SUCC(ret) && c < file_table.col_cnt(); ++c) {
+        const int64_t idx = r * file_table.col_cnt() + c;
+        const ObFileSqlColumn &col = file_table.columns_.at(c);
+        const bool is_null = file_table.is_null_.at(idx);
+        const ObString &cell = file_table.cells_.at(idx);
+        ObRawExpr *expr = NULL;
+        ObConstRawExpr *c_expr = NULL;
+        if (is_null) {
+          if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, expr))) {
+          }
+        } else if (FS_COL_BOOLEAN == col.type_) {
+          const int64_t v = (cell.length() == 1 && cell.ptr()[0] == '1') ? 1 : 0;
+          if (OB_FAIL(ObRawExprUtils::build_const_int_expr(
+                  *params_.expr_factory_, ObTinyIntType, v, c_expr))) {
+          } else {
+            expr = c_expr;
+          }
+        } else if (FS_COL_BIGINT == col.type_) {
+          char tmp[64];
+          const int32_t n = cell.length() < 63 ? cell.length() : 63;
+          MEMCPY(tmp, cell.ptr(), n);
+          tmp[n] = '\0';
+          const int64_t v = strtoll(tmp, NULL, 10);
+          if (OB_FAIL(ObRawExprUtils::build_const_int_expr(
+                  *params_.expr_factory_, ObIntType, v, c_expr))) {
+          } else {
+            expr = c_expr;
+          }
+        } else if (FS_COL_DOUBLE == col.type_) {
+          char tmp[128];
+          const int32_t n = cell.length() < 127 ? cell.length() : 127;
+          MEMCPY(tmp, cell.ptr(), n);
+          tmp[n] = '\0';
+          const double v = strtod(tmp, NULL);
+          if (OB_FAIL(ObRawExprUtils::build_const_double_expr(
+                  *params_.expr_factory_, ObDoubleType, v, c_expr))) {
+          } else {
+            expr = c_expr;
+          }
+        } else if (FS_COL_DATE == col.type_ || FS_COL_DATETIME == col.type_) {
+          if (OB_FAIL(ObRawExprUtils::build_const_string_expr(
+                  *params_.expr_factory_, ObVarcharType, cell, cs_type, c_expr))) {
+          } else {
+            expr = c_expr;
+            ObRawExpr *casted = NULL;
+            ObRawExprResType dst;
+            dst.set_type(FS_COL_DATE == col.type_ ? ObDateType : ObDateTimeType);
+            if (OB_FAIL(ObRawExprUtils::try_add_cast_expr_above(
+                    params_.expr_factory_, session_info_, *expr, dst, casted))) {
+            } else if (OB_NOT_NULL(casted)) {
+              expr = casted;
+            }
+          }
+        } else { // VARCHAR
+          if (OB_FAIL(ObRawExprUtils::build_const_string_expr(
+                  *params_.expr_factory_, ObVarcharType, cell, cs_type, c_expr))) {
+          } else {
+            expr = c_expr;
+          }
+        }
+        if (OB_SUCC(ret)) {
+          if (OB_ISNULL(expr)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(expr->formalize(session_info_))) {
+          } else if (OB_FAIL(table_def->access_exprs_.push_back(expr))) {
+          }
+        }
+      }
+    }
+
+    // Column result types from inferred schema (stable even when first row is NULL).
+    ObSEArray<ObString, 8> col_names;
     if (OB_SUCC(ret)) {
-      // Readers / physical scan land in a follow-up change. Keep the gate and
-      // option validation behavior fixed so OFF / bad-format / sample_size fail correctly.
-      UNUSED(header);
-      UNUSED(alias_node);
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql table scan (csv/json/parquet/glob)");
-      LOG_WARN("file sql scan not implemented yet", K(kind), K(path), K(format));
+      for (int64_t c = 0; OB_SUCC(ret) && c < file_table.col_cnt(); ++c) {
+        const ObFileSqlColumn &col = file_table.columns_.at(c);
+        ObRawExprResType rt;
+        rt.set_type(ob_file_sql_obj_type(col.type_));
+        rt.set_collation_type(cs_type);
+        if (FS_COL_BOOLEAN == col.type_) {
+          rt.set_length(1);
+        }
+        if (!col.nullable_) {
+          rt.set_result_flag(NOT_NULL_FLAG);
+        }
+        if (OB_FAIL(table_def->column_types_.push_back(rt))) {
+        } else if (OB_FAIL(col_names.push_back(col.name_))) {
+        }
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      new_table_item->table_id_ = generate_table_id();
+      new_table_item->table_name_ = alias_name;
+      new_table_item->alias_name_ = alias_name;
+      new_table_item->type_ = TableItem::VALUES_TABLE;
+      new_table_item->is_view_table_ = false;
+      if (file_table.row_cnt_ == 0 && file_table.col_cnt() > 0) {
+        // empty data but with schema: still need at least zero exprs; row_cnt already 0.
+      }
+      if (OB_FAIL(dml_stmt->add_table_item(session_info_, new_table_item))) {
+      } else if (file_table.col_cnt() > 0 &&
+                 OB_FAIL(gen_file_sql_column_items(col_names, table_def->column_types_,
+                                                   *new_table_item))) {
+      } else if (file_table.row_cnt_ > 0 &&
+                 OB_FAIL(estimate_values_table_stats(*table_def))) {
+      } else {
+        table_item = new_table_item;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDMLResolver::gen_file_sql_column_items(const ObIArray<ObString> &col_names,
+                                             const ObIArray<ObRawExprResType> &res_types,
+                                             TableItem &table_item)
+{
+  int ret = OB_SUCCESS;
+  ObValuesTableDef *table_def = table_item.values_table_def_;
+  const int64_t column_cnt = col_names.count();
+  if (OB_ISNULL(params_.expr_factory_) || OB_ISNULL(allocator_) || OB_ISNULL(get_stmt()) ||
+      OB_ISNULL(table_def) ||
+      OB_UNLIKELY(column_cnt <= 0 || res_types.count() != column_cnt)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (table_def->access_exprs_.count() > 0 &&
+             table_def->access_exprs_.count() % column_cnt != 0) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < column_cnt; ++i) {
+      ObColumnRefRawExpr *column_expr = NULL;
+      if (OB_FAIL(params_.expr_factory_->create_raw_expr(T_REF_COLUMN, column_expr))) {
+      } else if (OB_ISNULL(column_expr)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        column_expr->set_result_type(res_types.at(i));
+        if (table_def->access_exprs_.count() > i && OB_NOT_NULL(table_def->access_exprs_.at(i))) {
+          column_expr->set_result_flag(table_def->access_exprs_.at(i)->get_result_flag());
+        }
+        column_expr->set_ref_id(table_item.table_id_, i + OB_APP_MIN_COLUMN_ID);
+        column_expr->set_column_attr(table_item.table_name_, col_names.at(i));
+        if (OB_FAIL(column_expr->add_flag(IS_COLUMN))) {
+        } else {
+          ColumnItem column_item;
+          column_item.expr_ = column_expr;
+          column_item.table_id_ = column_expr->get_table_id();
+          column_item.column_id_ = column_expr->get_column_id();
+          column_item.column_name_ = column_expr->get_column_name();
+          if (OB_FAIL(get_stmt()->add_column_item(column_item))) {
+          }
+        }
+      }
     }
   }
   return ret;
