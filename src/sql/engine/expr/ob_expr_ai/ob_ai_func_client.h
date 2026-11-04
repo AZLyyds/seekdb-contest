@@ -54,6 +54,9 @@ private:
   int send_post(ObJsonObject *data, ObJsonObject *&response);
   int send_post_batch(ObArray<ObJsonObject *> &data_array, ObArray<ObJsonObject *> &responses);
   int init_easy_handle(CURL *curl, ObJsonObject *data, ObStringBuffer &response_buf);
+  static int rewrite_loopback_url(common::ObIAllocator &allocator,
+                                  const common::ObString &url,
+                                  common::ObString &out_url);
   static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp);
   bool is_retryable_status_code(int64_t http_code);
   bool is_timeout();

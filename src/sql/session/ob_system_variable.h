@@ -929,6 +929,11 @@ public:
                                            const sql::ObBasicSessionInfo &session,
                                            const ObBasicSysVar &sys_var,
                                            common::ObObj &result_obj);
+  // Return underlying int value (0/1) instead of OFF/ON strings for SELECT @@var.
+  static int to_obj_int_value(common::ObIAllocator &allocator,
+                              const sql::ObBasicSessionInfo &session,
+                              const ObBasicSysVar &sys_var,
+                              common::ObObj &result_obj);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSysVarToObjFuncs);
 };

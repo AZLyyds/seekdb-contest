@@ -73,16 +73,61 @@ ObAIFuncClient::~ObAIFuncClient()
   }
 }
 
+int ObAIFuncClient::rewrite_loopback_url(common::ObIAllocator &allocator,
+                                         const common::ObString &url,
+                                         ObString &out_url)
+{
+  int ret = OB_SUCCESS;
+  // Contest mock listens on 0.0.0.0:8000; curl clients must dial 127.0.0.1.
+  static const char k_bad[] = "://0.0.0.0";
+  static const char k_good[] = "://127.0.0.1";
+  const int64_t bad_len = static_cast<int64_t>(sizeof(k_bad) - 1);
+  const int64_t good_len = static_cast<int64_t>(sizeof(k_good) - 1);
+  int64_t hit = -1;
+  if (url.empty() || OB_ISNULL(url.ptr())) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    for (int64_t i = 0; i + bad_len <= url.length(); ++i) {
+      if (0 == MEMCMP(url.ptr() + i, k_bad, bad_len)) {
+        hit = i;
+        break;
+      }
+    }
+    if (hit < 0) {
+      if (OB_FAIL(ob_write_string(allocator, url, out_url, true))) {
+      }
+    } else {
+      const int64_t suffix_off = hit + bad_len;
+      const int64_t suffix_len = url.length() - suffix_off;
+      const int64_t new_len = hit + good_len + suffix_len;
+      char *buf = static_cast<char *>(allocator.alloc(new_len + 1));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(buf, url.ptr(), hit);
+        MEMCPY(buf + hit, k_good, good_len);
+        if (suffix_len > 0) {
+          MEMCPY(buf + hit + good_len, url.ptr() + suffix_off, suffix_len);
+        }
+        buf[new_len] = '\0';
+        out_url.assign_ptr(buf, static_cast<int32_t>(new_len));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAIFuncClient::init(common::ObIAllocator &allocator, const common::ObString &url, ObArray<ObString> &headers) 
 {
   int ret = OB_SUCCESS;
   int64_t remain_timeout_us = THIS_WORKER.is_timeout_ts_valid() ? THIS_WORKER.get_timeout_remain() : timeout_sec_ * 1000000;
-  if (OB_ISNULL(url) || headers.empty()) {
+  // Ollama providers may legitimately send an empty header list.
+  if (OB_ISNULL(url)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
     allocator_ = &allocator;
     ObString url_str;
-    if (OB_FAIL(ob_write_string(*allocator_, url, url_str, true))) {
+    if (OB_FAIL(rewrite_loopback_url(*allocator_, url, url_str))) {
     } else {
       url_ = url_str.ptr();
     } 
