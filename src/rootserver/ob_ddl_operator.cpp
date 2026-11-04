@@ -37,6 +37,7 @@
 #include "pl/pl_cache/ob_pl_cache_mgr.h"
 #include "share/schema/ob_dependency_info.h"  // relocated-definition owner
 #include "share/schema/ob_multi_version_schema_service.h"  // relocated-definition owner
+#include "share/schema/ob_ai_column_sql_service.h"
 
 namespace oceanbase
 {
@@ -568,6 +569,9 @@ int ObDDLOperator::create_table(ObTableSchema &table_schema,
         ddl_stmt_str,
         need_sync_schema_version,
         is_truncate_table))) {
+    } else if (OB_FAIL(ObAiColumnSqlService::insert_ai_columns_for_table(trans, table_schema))) {
+      RS_LOG(WARN, "failed to persist AI column metadata", K(ret),
+             K(table_schema.get_table_id()));
     } else if (OB_FAIL(sync_version_for_cascade_table(table_schema.get_depend_table_ids(), trans))) {
     } else if (OB_FAIL(sync_version_for_cascade_mock_fk_parent_table(table_schema.get_depend_mock_fk_parent_table_ids(), trans))) {
     }
@@ -1273,6 +1277,10 @@ int ObDDLOperator::insert_single_column(ObMySQLTransaction &trans,
     //do nothing
   } else if (OB_FAIL(schema_service->get_table_sql_service().insert_single_column(
              trans, new_table_schema, new_column, true))) {
+  } else if (new_column.is_ai_column()
+             && OB_FAIL(ObAiColumnSqlService::insert_ai_column(
+                    trans, new_table_schema.get_table_id(), new_column))) {
+    RS_LOG(WARN, "failed to persist AI column metadata on add column", K(ret), K(new_column));
   }
   return ret;
 }

@@ -3457,11 +3457,116 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          } else if (alter_column_schema.is_ai_column()
+                     && OB_FAIL(add_ai_column_hidden_for_alter(*alter_table_stmt,
+                                                              alter_column_schema))) {
+            SQL_RESV_LOG(WARN, "failed to add AI column hidden columns", K(ret));
           }
         }
       }
     }
     add_column_cnt_++;
+  }
+  return ret;
+}
+
+int ObAlterTableResolver::add_ai_column_hidden_for_alter(
+    ObAlterTableStmt &alter_table_stmt,
+    AlterColumnSchema &ai_column)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(table_schema_) || OB_ISNULL(allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    // Provisional IDs match rootserver sequential ++max_used assignment order.
+    uint64_t ai_id = table_schema_->get_max_used_column_id();
+    const int64_t pending =
+        alter_table_stmt.get_alter_table_arg().alter_table_schema_.get_column_count();
+    // pending already includes the AI result column just pushed.
+    ai_id += static_cast<uint64_t>(pending);
+    const uint64_t state_id = ai_id + 1;
+    const uint64_t request_id = ai_id + 2;
+    const uint64_t rspec_id = ai_id + 3;
+    int64_t max_retries = 0;
+    int64_t sync_mode = 0;
+    ObString expr;
+    ObString old_comment = ai_column.get_comment();
+    if (old_comment.prefix_match("__AI__|")) {
+      const char *p = old_comment.ptr();
+      const char *end = p + old_comment.length();
+      const char *keys[] = {"mr=", "sm="};
+      int64_t *vals[] = {&max_retries, &sync_mode};
+      for (int ki = 0; ki < 2; ++ki) {
+        const int64_t key_len = static_cast<int64_t>(strlen(keys[ki]));
+        for (const char *q = p; q + key_len < end; ++q) {
+          if (0 == strncmp(q, keys[ki], key_len)) {
+            const char *found = q + key_len;
+            int64_t v = 0;
+            while (found < end && *found >= '0' && *found <= '9') {
+              v = v * 10 + (*found - '0');
+              ++found;
+            }
+            *vals[ki] = v;
+            break;
+          }
+        }
+      }
+      for (const char *q = p; q + 5 <= end; ++q) {
+        if (0 == strncmp(q, "expr=", 5)) {
+          expr.assign_ptr(q + 5, static_cast<int32_t>(end - (q + 5)));
+          break;
+        }
+      }
+    }
+    ObSqlString meta;
+    if (OB_FAIL(meta.append_fmt("__AI__|mr=%ld|sm=%ld|st=%lu|rq=%lu|rs=%lu|expr=",
+                                max_retries, sync_mode, state_id, request_id, rspec_id))) {
+    } else if (OB_FAIL(meta.append(expr))) {
+    } else {
+      char *ptr = NULL;
+      if (OB_ISNULL(ptr = static_cast<char *>(allocator_->alloc(meta.length() + 1)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(ptr, meta.ptr(), meta.length());
+        ptr[meta.length()] = '\0';
+        const ObString new_comment(static_cast<int32_t>(meta.length()), ptr);
+        ai_column.set_comment(new_comment);
+        AlterColumnSchema *stored = static_cast<AlterColumnSchema *>(
+            alter_table_stmt.get_alter_table_arg().alter_table_schema_.get_column_schema(
+                ai_column.get_column_name_str()));
+        if (OB_NOT_NULL(stored)) {
+          stored->set_comment(new_comment);
+        }
+      }
+    }
+    char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
+    const char *prefixes[3] = {"__ai_state_", "__ai_request_", "__ai_rspec_"};
+    const ObObjType types[3] = {ObIntType, ObVarcharType, ObLongTextType};
+    for (int i = 0; OB_SUCC(ret) && i < 3; ++i) {
+      AlterColumnSchema hidden;
+      hidden.reset();
+      hidden.alter_type_ = OB_DDL_ADD_COLUMN;
+      const int64_t n = snprintf(name_buf, sizeof(name_buf), "%s%lu", prefixes[i], ai_id);
+      if (n <= 0 || n >= static_cast<int64_t>(sizeof(name_buf))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(hidden.set_column_name(ObString(static_cast<int32_t>(n), name_buf)))) {
+      } else {
+        hidden.set_data_type(types[i]);
+        hidden.set_ai_column_hidden();
+        hidden.set_nullable(true);
+        if (ObVarcharType == types[i]) {
+          hidden.set_data_length(4096);
+          hidden.set_charset_type(CHARSET_UTF8MB4);
+          hidden.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+        } else if (ObLongTextType == types[i]) {
+          hidden.set_data_length(OB_MAX_LONGTEXT_LENGTH);
+          hidden.set_charset_type(CHARSET_UTF8MB4);
+          hidden.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+        }
+        if (OB_FAIL(alter_table_stmt.add_column(hidden))) {
+        }
+      }
+    }
   }
   return ret;
 }

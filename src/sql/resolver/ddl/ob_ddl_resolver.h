@@ -545,6 +545,16 @@ protected:
   int resolve_generated_column_attribute(share::schema::ObColumnSchemaV2 &column,
                                          ParseNode *attrs_node,
                                          ObColumnResolveStat &reslove_stat);
+  int resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &column,
+                                  ParseNode *ai_node);
+  static int build_ai_column_normalized_expr(common::ObIAllocator &allocator,
+                                            const share::schema::ObColumnSchemaV2 &column,
+                                            const common::ObString &raw_expr,
+                                            common::ObString &normalized_expr);
+  static int check_ai_embed_dimension(const share::schema::ObColumnSchemaV2 &column,
+                                      ParseNode *expr_node);
+  static int check_ai_column_dependency(const common::ObIArray<common::ObString> &ai_column_names,
+                                        ParseNode *expr_node);
   int resolve_srid_node(share::schema::ObColumnSchemaV2 &column,
                         const ParseNode &srid_node);
   int resolve_column_skip_index(
