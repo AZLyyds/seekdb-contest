@@ -17,7 +17,30 @@
 #ifndef OCEANBASE_SHARE_INNER_TABLE_OB_INNER_TABLE_AI_COLUMN_CONSTANTS_H_
 #define OCEANBASE_SHARE_INNER_TABLE_OB_INNER_TABLE_AI_COLUMN_CONSTANTS_H_
 
-// Use generated constants (ids + names) from generate_inner_table_schema.py.
-#include "share/inner_table/ob_inner_table_schema_constants.h"
+#include <stdint.h>
+
+// Contest AI Column system tables. Keep in sync with
+// ob_inner_table_schema_def.py (__all_ai_column / __all_ai_column_task).
+//
+// IMPORTANT: do NOT include the generated ob_inner_table_schema_constants.h
+// here. That file is gitignored and may be absent depending on generate order;
+// including it caused tip 5724f33 "执行失败" (compile). Use the same bare
+// table names as other system tables (e.g. __all_ai_model).
+
+#ifndef OB_ALL_AI_COLUMN_TID
+const uint64_t OB_ALL_AI_COLUMN_TID = 1131;
+#endif
+#ifndef OB_ALL_AI_COLUMN_TASK_TID
+const uint64_t OB_ALL_AI_COLUMN_TASK_TID = 1132;
+#endif
+
+// Prefer macros so a later include of generated constants (const char *const)
+// can still compile if a TU sees both; service code only needs the names.
+#ifndef OB_ALL_AI_COLUMN_TNAME
+#define OB_ALL_AI_COLUMN_TNAME "__all_ai_column"
+#endif
+#ifndef OB_ALL_AI_COLUMN_TASK_TNAME
+#define OB_ALL_AI_COLUMN_TASK_TNAME "__all_ai_column_task"
+#endif
 
 #endif /* OCEANBASE_SHARE_INNER_TABLE_OB_INNER_TABLE_AI_COLUMN_CONSTANTS_H_ */
